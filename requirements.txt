@@ -1,0 +1,12 @@
+click
+numpy
+torch
+timm
+git+https://github.com/openai/CLIP.git
+scipy
+opencv-python
+scikit-learn
+pandas
+scikit-image
+tensorboard
+matplotlib

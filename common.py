@@ -5,6 +5,132 @@ import numpy as np
 import scipy.ndimage as ndimage
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
+from PIL import Image
+import clip
+from collections import OrderedDict
+import torchvision.transforms as transforms
+
+class QuickGELU(nn.Module):
+    def forward(self, x: torch.Tensor):
+        return x * torch.sigmoid(1.702 * x)
+
+
+class LayerNorm(nn.LayerNorm):
+    """Subclass torch's LayerNorm to handle fp16."""
+
+    def forward(self, x: torch.Tensor):
+        orig_type = x.dtype
+        ret = super().forward(x.type(torch.float32))
+        return ret.type(orig_type)
+
+
+class ResidualAttentionBlock(nn.Module):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
+        super().__init__()
+
+        self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.ln_1 = LayerNorm(d_model)
+        self.mlp = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(d_model, d_model * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(d_model * 4, d_model))
+        ]))
+        self.ln_2 = LayerNorm(d_model)
+        self.attn_mask = attn_mask
+
+    def attention(self, x: torch.Tensor):
+        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
+        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+
+    def forward(self, x: torch.Tensor):
+        x = x + self.attention(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+class Transformer(nn.Module):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None):
+        super().__init__()
+        self.width = width
+        self.layers = layers
+        self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
+
+    def forward(self, x: torch.Tensor):
+        return self.resblocks(x)
+
+
+class CLIPFeatureExtractor(nn.Module):
+    def __init__(self, backbone, layers_to_extract_from, device, input_resolution=224, patch_size=32, width=768, layers=12, heads=12, output_dim=768):
+        super(CLIPFeatureExtractor, self).__init__()
+        
+        self.device = device
+        print(self.device)
+        self.backbone = backbone
+        
+        self.layers_to_extract_from = layers_to_extract_from   
+            
+        self.input_resolution = input_resolution
+        self.output_dim = output_dim
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
+
+        scale = width ** -0.5
+        self.class_embedding = nn.Parameter(scale * torch.randn(width))
+        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
+        self.ln_pre = LayerNorm(width)
+
+        self.transformer = Transformer(width, layers, heads)
+
+        self.ln_post = LayerNorm(width)
+        self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+        
+        _, self.preprocess = clip.load("ViT-B/32", device=self.device)
+        
+        self.preprocess = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Assuming standard normalization
+        ])
+        
+        self.to(self.device)
+        
+
+    def forward(self, x):
+        # Resize to 224 a batch of images
+        x = F.interpolate(x, size=224, mode='bilinear', align_corners=False)
+        
+        # Normalize the images
+        x = (x - 0.5) / 0.5
+        
+        x = x.to(device=self.device)
+        
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.to(x.dtype)
+        x = self.ln_pre(x)
+        
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        
+        max_layer = max(self.layers_to_extract_from)
+        
+        features = []
+        
+        for layer in range(max_layer + 1):
+            x = self.transformer.resblocks[layer](x)
+            if layer in self.layers_to_extract_from:
+                features.append(x.permute(1, 0, 2))  # LND -> NLD
+        
+        
+        return features
+
+    def feature_dimensions(self, input_shape):
+        """Computes the feature dimensions for all layers given input_shape."""
+        _input = torch.ones([1] + list(input_shape)).to(self.device)
+        _output = self(_input)
+        return [output.shape[2] for output in _output]
+
+
 
 
 class _BaseMerger:
@@ -208,5 +334,4 @@ class ForwardHook:
 
 class LastLayerToExtractReachedException(Exception):
     pass
-
 

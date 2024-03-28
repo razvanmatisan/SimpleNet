@@ -25,7 +25,6 @@ from utils import plot_segmentation_images
 LOGGER = logging.getLogger(__name__)
 
 def init_weight(m):
-
     if isinstance(m, torch.nn.Linear):
         torch.nn.init.xavier_normal_(m.weight)
     elif isinstance(m, torch.nn.Conv2d):
@@ -134,20 +133,31 @@ class SimpleNet(torch.nn.Module):
         pid = os.getpid()
         def show_mem():
             return(psutil.Process(pid).memory_info())
-
+                
         self.backbone = backbone.to(device)
-        self.layers_to_extract_from = layers_to_extract_from
+        self.backbone_name = kwargs.get("backbone_name")
         self.input_shape = input_shape
-
+        
         self.device = device
         self.patch_maker = PatchMaker(patchsize, stride=patchstride)
 
         self.forward_modules = torch.nn.ModuleDict({})
 
-        feature_aggregator = common.NetworkFeatureAggregator(
-            self.backbone, self.layers_to_extract_from, self.device, train_backbone
-        )
-        feature_dimensions = feature_aggregator.feature_dimensions(input_shape)
+        # Feature Extractor for CLIP
+        if self.backbone_name == "clip":
+            self.layers_to_extract_from = [int(layer) for layer in layers_to_extract_from]
+            feature_aggregator = common.CLIPFeatureExtractor(
+                self.backbone, self.layers_to_extract_from, self.device
+            )
+
+        # Feature extractor for ResNet
+        else:
+            self.layers_to_extract_from = layers_to_extract_from
+            feature_aggregator = common.NetworkFeatureAggregator(
+                self.backbone, self.layers_to_extract_from, self.device, train_backbone
+            )
+        
+        feature_dimensions = feature_aggregator.feature_dimensions(input_shape)        
         self.forward_modules["feature_aggregator"] = feature_aggregator
 
         preprocessing = common.Preprocessing(
@@ -155,6 +165,7 @@ class SimpleNet(torch.nn.Module):
         )
         self.forward_modules["preprocessing"] = preprocessing
 
+        # Feature Adaptor
         self.target_embed_dimension = target_embed_dimension
         preadapt_aggregator = common.Aggregator(
             target_dim=target_embed_dimension
@@ -237,12 +248,16 @@ class SimpleNet(torch.nn.Module):
             with torch.no_grad():
                 features = self.forward_modules["feature_aggregator"](images)
 
-        features = [features[layer] for layer in self.layers_to_extract_from]
+        if self.backbone_name != "clip":
+            features = [features[layer] for layer in self.layers_to_extract_from]
 
         for i, feat in enumerate(features):
             if len(feat.shape) == 3:
                 B, L, C = feat.shape
-                features[i] = feat.reshape(B, int(math.sqrt(L)), int(math.sqrt(L)), C).permute(0, 3, 1, 2)
+                if self.backbone_name == "clip":
+                    features[i] = feat.reshape(B, 5, 10, C).permute(0, 3, 1, 2)
+                else:
+                    features[i] = feat.reshape(B, int(math.sqrt(L)), int(math.sqrt(L)), C).permute(0, 3, 1, 2)
 
         features = [
             self.patch_maker.patchify(x, return_spatial_info=True) for x in features
@@ -281,13 +296,10 @@ class SimpleNet(torch.nn.Module):
         # sized features, these are brought into the correct form here.
         features = self.forward_modules["preprocessing"](features) # pooling each feature to same channel and stack together
         features = self.forward_modules["preadapt_aggregator"](features) # further pooling        
-
-
         return features, patch_shapes
 
     
     def test(self, training_data, test_data, save_segmentation_images):
-
         ckpt_path = os.path.join(self.ckpt_dir, "models.ckpt")
         if os.path.exists(ckpt_path):
             state_dicts = torch.load(ckpt_path, map_location=self.device)

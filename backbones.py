@@ -1,6 +1,7 @@
 import timm  # noqa
 import torch
 import torchvision.models as models  # noqa
+import clip
 
 def load_ref_wrn50():
     
@@ -59,4 +60,8 @@ _BACKBONES = {
 
 
 def load(name):
+    if name == "clip":
+        model, _ = clip.load("ViT-B/32")
+        return model
+    
     return eval(_BACKBONES[name])

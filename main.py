@@ -216,6 +216,7 @@ def net(
                 pre_proj=pre_proj,
                 proj_layer_type=proj_layer_type,
                 mix_noise=mix_noise,
+                backbone_name=backbone_name,
             )
             simplenets.append(simplenet_inst)
         return simplenets
