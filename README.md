@@ -60,7 +60,7 @@ In order to run the code using a CLIP backbone, you can change the bash script `
 
 It is important to mention that the indices of the layers (i.e., '-le' parameters) need to be integers from 0 to 11 (because ViT-B/32 has 12 attention blocks).
 
-One could perform hyperparameter tuning to find the best values of the parameters. However, the values mentioned above lead to competitive results, comparable with SimpleNet with wideresnet50.
+One could perform hyperparameter tuning to find the best values of the parameters.
 
 
 ## Citation
